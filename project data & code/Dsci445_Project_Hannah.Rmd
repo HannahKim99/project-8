@@ -1,0 +1,199 @@
+## Packages
+```{r}
+library(tidymodels)
+library(randomForest)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(pROC)
+library(glmnet)
+```
+
+## Data Cleaning and Merging
+```{r}
+# Read the datasets
+player_awards <- read.csv("Player Award Shares.csv")
+advanced_stats <- read.csv("Advanced.csv")
+
+# Check the unique values in the key columns
+print(unique(advanced_stats$player))
+print(unique(player_awards$player))
+print(unique(advanced_stats$season))
+print(unique(player_awards$season))
+
+# Merge the datasets
+combined_data <- merge(advanced_stats, player_awards, by = c("season", "player"))
+
+
+# Rename 'tm.x' to 'team' in combined_data
+combined_data <- combined_data %>%
+  rename(team = tm.x)
+
+team_abbrev <- read.csv("Team Abbrev.csv")
+team_abbrev <- team_abbrev %>%
+  rename(team_name = team, team = abbreviation)
+
+# Merge combined_data with team_abbrev
+combined_data <- merge(combined_data, team_abbrev, by = c("season", "team"))
+combined_data <- combined_data %>%
+  select(-c(age.y, tm.y, seas_id.y, player_id.y, lg.y))
+colnames(combined_data) <- tolower(colnames(combined_data))
+
+# Inspect the first few rows of the merged data
+head(combined_data)
+
+combined_data$dpoy_winner <- with(combined_data, as.factor(award == "dpoy" & winner == TRUE))
+
+combined_data <- combined_data %>%
+  subset(!is.na(season) & !is.na(award) & !is.na(winner) & 
+         !is.na(dws) & !is.na(blk_percent) & !is.na(stl_percent) & 
+         !is.na(trb_percent) & !is.na(dbpm) & !is.na(playoffs))
+
+combined_data <- combined_data %>%
+  select(-birth_year)
+
+# Check the updated dataset
+combined_data <- combined_data %>% subset(award == "dpoy")
+head(combined_data)
+
+combined_data<-combined_data %>%
+	select(pos,age.x,experience,g,mp,per,ts_percent,x3p_ar,f_tr,orb_percent,drb_percent,trb_percent,ast_percent,stl_percent,blk_percent,tov_percent,usg_percent,ows,dws,ws,ws_48,obpm,dbpm,bpm,vorp,first,pts_won,share,playoffs,dpoy_winner,season)
+# only keep variables that seem good for regression
+
+seasons_2015to2022 <- combined_data %>%
+  subset(season <= 2022) %>%
+  select(-season)
+
+seasons_2023 <- combined_data %>%
+  subset(season == 2023) %>%
+  select(-season)
+
+
+#seasons_2015to2022 %>% arrange(desc(dpoy_winner))
+
+set.seed(445)
+colnames(seasons_2015to2022)
+
+seasons_2015to2022_x<- data.matrix(data.frame(seasons_2015to2022 %>% select(-dpoy_winner) , stringsAsFactors = FALSE))
+
+seasons_2015to2022_y<- data.matrix(data.frame(seasons_2015to2022 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
+
+
+seasons_2023_x<- data.matrix(data.frame(seasons_2023 %>% select(-dpoy_winner) , stringsAsFactors = FALSE))
+
+seasons_2023_y<- data.matrix(data.frame(seasons_2023 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
+```
+
+## Ridge 
+```{r}
+ridge.train<-cv.glmnet(x = seasons_2015to2022_x,
+                       y = seasons_2015to2022_y,
+                       family="binomial",
+                       alpha=0)
+
+best.lambda<- ridge.train$lambda.min
+best.lambda
+best.fit <- ridge.train$glmnet.fit
+summary(best.fit)
+best.fit
+coef(best.fit)
+
+ridge.train.best <- glmnet(x = seasons_2015to2022_x,
+                       y = seasons_2015to2022_y,
+                       family="binomial",
+                       alpha=0,
+                       lambda=best.lambda)
+
+coef(ridge.train.best)
+
+ridge.pred <- predict(ridge.train.best, s=best.lambda, newx=seasons_2023_x, type="response")
+ridge.pred 
+confusion.glmnet(ridge.train.best,newx=seasons_2023_x, newy=seasons_2023_y)
+
+ridge.pred.prob <- predict(ridge.train.best, s=best.lambda, newx=seasons_2023_x, type="response") 
+
+ridge.pred.prob<-ifelse(ridge.pred.prob>0.5,T,F)
+seasons_2023$ridge.pred <- ridge.pred.prob[,1]
+
+seasons_2023 %>% arrange(desc(ridge.pred))
+
+```
+
+## Lasso
+```{r}
+lasso.train.cv<-cv.glmnet(x = seasons_2015to2022_x,
+                       y = seasons_2015to2022_y,
+                       family="binomial",
+                       alpha=1)
+
+best.lambda.lasso<- lasso.train.cv$lambda.min
+best.lambda.lasso
+best.fit.lasso <- lasso.train.cv$glmnet.fit
+summary(best.fit.lasso)
+best.fit.lasso
+coef(best.fit.lasso)
+lasso.train.best <- glmnet(x = seasons_2015to2022_x,
+                       y = seasons_2015to2022_y,
+                       family="binomial",
+                       alpha=1,
+                       lambda=best.lambda.lasso,
+                       path=TRUE)
+
+coef(lasso.train.best)
+
+lasso.pred <- predict(lasso.train.best, s=best.lambda, newx=seasons_2023_x, type="response")
+lasso.pred 
+confusion.glmnet(lasso.train.best,newx=seasons_2023_x, newy=seasons_2023_y)
+
+lasso.pred.prob <- predict(lasso.train.best, s=best.lambda, newx=seasons_2023_x, type="response") 
+
+lasso.pred.prob<-ifelse(lasso.pred.prob>0.5,T,F)
+seasons_2023$lasso.pred <- lasso.pred.prob[,1]
+
+seasons_2023 %>% arrange(desc(lasso.pred))
+
+```
+
+## Random Forest
+```{r}
+randomforest <- randomForest(dpoy_winner~., 
+                             data=seasons_2015to2022,
+                             proximity=TRUE,
+                             ntree=1000,
+                             keep.forest=TRUE)
+randomforest
+
+rf.pred.2015to2022 <- predict(randomforest, seasons_2015to2022, type="prob")
+roc.rf.2015to2022 <- roc(seasons_2015to2022$dpoy_winner, rf.pred.2015to2022[,2])
+#auc(roc.rf.2015to2022)
+#plot(roc.rf.2015to2022)
+
+rf.pred <- predict(randomforest, seasons_2023, type="prob")
+rf.pred<-factor(apply(rf.pred,1,function(x) ifelse(x[1]>x[2],F,T)))
+confusionMatrix(rf.pred, factor(seasons_2023$dpoy_winner))
+seasons_2023$rf.pred <-rf.pred
+seasons_2023 %>% arrange(desc(rf.pred))
+
+#roc.rf <- roc(seasons_2023$dpoy_winner, rf.pred[,2])
+#auc(roc.rf)
+#plot(roc.rf)
+
+```
+
+## XGBoost (package: xgboost)
+```{r eval=FALSE}
+library(xgboost)
+
+boost <- boost_tree(trees= 5000,
+                    tree_depth = 4) %>%
+  set_engine('xgboost') %>%
+  set_mode('classification')
+
+xgb_model <-boost %>% 
+  fit(dpoy_winner~., data=seasons_2015to2022)
+
+xgb_preds<-predict(xgb_model,seasons_2023)
+
+seasons_2023$xgp_pred<-xgb_preds$.pred_class
+seasons_2023
+```
