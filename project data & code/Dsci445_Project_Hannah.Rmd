@@ -24,7 +24,6 @@ print(unique(player_awards$season))
 # Merge the datasets
 combined_data <- merge(advanced_stats, player_awards, by = c("season", "player"))
 
-
 # Rename 'tm.x' to 'team' in combined_data
 combined_data <- combined_data %>%
   rename(team = tm.x)
@@ -39,9 +38,6 @@ combined_data <- combined_data %>%
   select(-c(age.y, tm.y, seas_id.y, player_id.y, lg.y))
 colnames(combined_data) <- tolower(colnames(combined_data))
 
-# Inspect the first few rows of the merged data
-head(combined_data)
-
 combined_data$dpoy_winner <- with(combined_data, as.factor(award == "dpoy" & winner == TRUE))
 
 combined_data <- combined_data %>%
@@ -52,31 +48,28 @@ combined_data <- combined_data %>%
 combined_data <- combined_data %>%
   select(-birth_year)
 
-# Check the updated dataset
 combined_data <- combined_data %>% subset(award == "dpoy")
-head(combined_data)
 
-combined_data<-combined_data %>%
-	select(pos,age.x,experience,g,mp,per,ts_percent,x3p_ar,f_tr,orb_percent,drb_percent,trb_percent,ast_percent,stl_percent,blk_percent,tov_percent,usg_percent,ows,dws,ws,ws_48,obpm,dbpm,bpm,vorp,first,pts_won,share,playoffs,dpoy_winner,season)
 # only keep variables that seem good for regression
+combined_data<-combined_data %>%
+	select(pos,age.x,experience,g,mp,per,ts_percent,x3p_ar,f_tr,orb_percent,drb_percent,trb_percent,ast_percent,stl_percent,blk_percent,tov_percent,usg_percent,ows,dws,ws,ws_48,obpm,dbpm,bpm,vorp,playoffs,dpoy_winner,season)
 
-seasons_2015to2022 <- combined_data %>%
+seasons_to2022 <- combined_data %>%
   subset(season <= 2022) %>%
   select(-season)
 
 seasons_2023 <- combined_data %>%
   subset(season == 2023) %>%
   select(-season)
+head(combined_data)
 
-
-#seasons_2015to2022 %>% arrange(desc(dpoy_winner))
+#seasons_to2022 %>% arrange(desc(dpoy_winner))
 
 set.seed(445)
-colnames(seasons_2015to2022)
 
-seasons_2015to2022_x<- data.matrix(data.frame(seasons_2015to2022 %>% select(-dpoy_winner) , stringsAsFactors = FALSE))
+seasons_to2022_x<- data.matrix(data.frame(seasons_to2022 %>% select(-dpoy_winner) , stringsAsFactors = FALSE))
 
-seasons_2015to2022_y<- data.matrix(data.frame(seasons_2015to2022 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
+seasons_to2022_y<- data.matrix(data.frame(seasons_to2022 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
 
 
 seasons_2023_x<- data.matrix(data.frame(seasons_2023 %>% select(-dpoy_winner) , stringsAsFactors = FALSE))
@@ -86,8 +79,9 @@ seasons_2023_y<- data.matrix(data.frame(seasons_2023 %>% select(dpoy_winner) , s
 
 ## Ridge 
 ```{r}
-ridge.train<-cv.glmnet(x = seasons_2015to2022_x,
-                       y = seasons_2015to2022_y,
+set.seed(445)
+ridge.train<-cv.glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
                        family="binomial",
                        alpha=0)
 
@@ -98,8 +92,8 @@ summary(best.fit)
 best.fit
 coef(best.fit)
 
-ridge.train.best <- glmnet(x = seasons_2015to2022_x,
-                       y = seasons_2015to2022_y,
+ridge.train.best <- glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
                        family="binomial",
                        alpha=0,
                        lambda=best.lambda)
@@ -108,21 +102,30 @@ coef(ridge.train.best)
 
 ridge.pred <- predict(ridge.train.best, s=best.lambda, newx=seasons_2023_x, type="response")
 ridge.pred 
+
 confusion.glmnet(ridge.train.best,newx=seasons_2023_x, newy=seasons_2023_y)
 
 ridge.pred.prob <- predict(ridge.train.best, s=best.lambda, newx=seasons_2023_x, type="response") 
-
 ridge.pred.prob<-ifelse(ridge.pred.prob>0.5,T,F)
 seasons_2023$ridge.pred <- ridge.pred.prob[,1]
 
 seasons_2023 %>% arrange(desc(ridge.pred))
 
+# Ridge regression plot
+ridge_coefs<-data.frame(predictor=ridge.train.best$beta@Dimnames[[1]],coef=ridge.train.best$beta@x)
+
+ggplot(ridge_coefs)+
+geom_col(aes(x=predictor,y=coef),fill='blue')+
+geom_hline(yintercept=0)+
+theme(axis.text.x=element_text(angle=45,hjust=1,face='bold',size=12))+
+labs(y='Coefficient Value',title='Ridge Regression Coefficients')
 ```
 
 ## Lasso
 ```{r}
-lasso.train.cv<-cv.glmnet(x = seasons_2015to2022_x,
-                       y = seasons_2015to2022_y,
+set.seed(445)
+lasso.train.cv<-cv.glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
                        family="binomial",
                        alpha=1)
 
@@ -132,12 +135,16 @@ best.fit.lasso <- lasso.train.cv$glmnet.fit
 summary(best.fit.lasso)
 best.fit.lasso
 coef(best.fit.lasso)
-lasso.train.best <- glmnet(x = seasons_2015to2022_x,
-                       y = seasons_2015to2022_y,
+lasso.train.best <- glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
                        family="binomial",
                        alpha=1,
                        lambda=best.lambda.lasso,
                        path=TRUE)
+
+lasso_timing<-system.time(
+glmnet(x = seasons_to2022_x, y = seasons_to2022_y, family="binomial", alpha=1, lambda=best.lambda.lasso,path=TRUE)
+)
 
 coef(lasso.train.best)
 
@@ -146,54 +153,71 @@ lasso.pred
 confusion.glmnet(lasso.train.best,newx=seasons_2023_x, newy=seasons_2023_y)
 
 lasso.pred.prob <- predict(lasso.train.best, s=best.lambda, newx=seasons_2023_x, type="response") 
-
 lasso.pred.prob<-ifelse(lasso.pred.prob>0.5,T,F)
 seasons_2023$lasso.pred <- lasso.pred.prob[,1]
 
-seasons_2023 %>% arrange(desc(lasso.pred))
+seasons_2023 %>% arrange(desc(lasso.pred))%>% select(-ridge.pred)
 
+
+# Lasso Regression plot
+lasso_coefs<-coef(lasso.train.best)
+lasso_coef_names<-lasso_coefs@Dimnames[[1]]
+lasso_coef_vals<-vector(length=length(lasso_coef_names))
+lasso_coef_vals[lasso_coefs@i +1]<-lasso_coefs@x
+lasso_coefs_df<-data.frame(predictor=lasso_coef_names,coef=lasso_coef_vals)
+lasso_coefs_df=subset(lasso_coefs_df, !coef==0)
+
+ggplot(lasso_coefs_df)+
+geom_col(aes(x=predictor,y=coef),fill='red')+
+theme(axis.text.x=element_text(angle=45,hjust=1,face='bold',size=12))+
+labs(y='Coefficient Value',title='Lasso Regression Coefficients')
 ```
 
 ## Random Forest
 ```{r}
+set.seed(445)
 randomforest <- randomForest(dpoy_winner~., 
-                             data=seasons_2015to2022,
+                             data=seasons_to2022,
                              proximity=TRUE,
                              ntree=1000,
                              keep.forest=TRUE)
 randomforest
 
-rf.pred.2015to2022 <- predict(randomforest, seasons_2015to2022, type="prob")
-roc.rf.2015to2022 <- roc(seasons_2015to2022$dpoy_winner, rf.pred.2015to2022[,2])
-#auc(roc.rf.2015to2022)
-#plot(roc.rf.2015to2022)
+rf.pred.to2022 <- predict(randomforest, seasons_to2022, type="prob")
+roc.rf.to2022 <- roc(seasons_to2022$dpoy_winner, rf.pred.to2022[,2])
+auc(roc.rf.to2022)
+plot(roc.rf.to2022)
 
 rf.pred <- predict(randomforest, seasons_2023, type="prob")
-rf.pred<-factor(apply(rf.pred,1,function(x) ifelse(x[1]>x[2],F,T)))
+rf.pred<-factor(apply(rf.pred,1,function(x) ifelse(x[2]>0.5,T,F)))
 confusionMatrix(rf.pred, factor(seasons_2023$dpoy_winner))
 seasons_2023$rf.pred <-rf.pred
-seasons_2023 %>% arrange(desc(rf.pred))
+seasons_2023 %>%arrange(desc(rf.pred)) %>% select(-ridge.pred, -lasso.pred)
 
-#roc.rf <- roc(seasons_2023$dpoy_winner, rf.pred[,2])
-#auc(roc.rf)
-#plot(roc.rf)
-
+roc.rf <- roc(seasons_2023$dpoy_winner, rf.pred1[,2])
+auc(roc.rf)
+plot(roc.rf)
 ```
 
-## XGBoost (package: xgboost)
-```{r eval=FALSE}
-library(xgboost)
+## Classification tree (package: rpart)
+```{r}
+set.seed(445)
+library(rpart)
+library(rpart.plot)
 
-boost <- boost_tree(trees= 5000,
-                    tree_depth = 4) %>%
-  set_engine('xgboost') %>%
-  set_mode('classification')
+seasons_to2022 <- combined_data %>%
+  subset(season <= 2022) %>%
+  select(-season)
 
-xgb_model <-boost %>% 
-  fit(dpoy_winner~., data=seasons_2015to2022)
+ct_model<-rpart(dpoy_winner~.,data=seasons_to2022)
+ct_timing<-system.time(rpart(dpoy_winner~.,data=seasons_to2022))
+ct_pred<-predict(ct_model,seasons_2023)
+ct_pred<-factor(apply(ct_pred,1,function(x) ifelse(x[1]>x[2],F,T)))
+confusionMatrix(ct_pred, factor(seasons_2023$dpoy_winner))
 
-xgb_preds<-predict(xgb_model,seasons_2023)
+seasons_2023$ct.pred<-ct_pred
 
-seasons_2023$xgp_pred<-xgb_preds$.pred_class
-seasons_2023
+seasons_2023 %>% arrange(desc(ct.pred)) %>% select(-ridge.pred, -lasso.pred, -rf.pred)
+
+rpart.plot(ct_model)
 ```
