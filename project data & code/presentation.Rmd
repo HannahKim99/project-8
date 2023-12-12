@@ -1,0 +1,720 @@
+---
+title: "NBA Award Prediction"
+author: "William Mayes, Hannah Kim"
+date: "2023-12-11"
+output:
+  slidy_presentation: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r, echo=FALSE, include=FALSE}
+library(tidymodels)
+library(randomForest)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(pROC)
+library(glmnet)
+library(e1071)
+```
+
+## Motivation
+
+### Sports betting
+  - Predicts the outcome of sport events and place wagers on those predictions
+  - Nevada sports bettor placed \$3.5 million in the Denver Nuggets and earned around \$2.5 million profit
+  
+```{r, echo=FALSE}
+knitr::include_graphics('nuggets.png')
+```
+Reference: https://www.mirror.co.uk/sport/other-sports/american-sports/nuggets-heat-nba-finals-betting-30180846
+
+## Dataset
+
+1.CSV files
+
+-   Player Award Shares - Indicates Winner among candidates
+
+```{r, echo=FALSE}
+player_awards <- read.csv("Player Award Shares.csv")
+head(player_awards,2)
+```
+
+-   Advanced - Indicates Statistic of each player
+
+```{r, echo=FALSE}
+advanced_stats <- read.csv("Advanced.csv")
+head(advanced_stats,2)
+```
+
+-   Team Abbrev - Indicates Playoff participation
+
+```{r, echo=FALSE}
+team_abbrev <- read.csv("Team Abbrev.csv")
+head(team_abbrev,2)
+```
+
+2.Data Splitting (by season)
+
+-   Training data - 1983 \~ 2022
+-   Test data - 2023
+
+```{r,echo=FALSE,include=FALSE}
+# Merge the datasets
+combined_data <- merge(advanced_stats, player_awards, by = c("season", "player"))
+
+# Rename 'tm.x' to 'team' in combined_data
+combined_data <- combined_data %>%
+  rename(team = tm.x)
+
+team_abbrev <- team_abbrev %>%
+  rename(team_name = team, team = abbreviation)
+
+# Merge combined_data with team_abbrev
+combined_data <- merge(combined_data, team_abbrev, by = c("season", "team"))
+combined_data <- combined_data %>%
+  select(-c(age.y, tm.y, seas_id.y, player_id.y, lg.y))
+colnames(combined_data) <- tolower(colnames(combined_data))
+
+combined_data$dpoy_winner <- with(combined_data, as.factor(award == "dpoy" & winner == TRUE))
+
+combined_data <- combined_data %>%
+  subset(!is.na(season) & !is.na(award) & !is.na(winner) & 
+         !is.na(dws) & !is.na(blk_percent) & !is.na(stl_percent) & 
+         !is.na(trb_percent) & !is.na(dbpm) & !is.na(playoffs))
+
+combined_data <- combined_data %>%
+  select(-birth_year)
+
+combined_data <- combined_data %>% subset(award == "dpoy")
+
+# only keep variables that seem good for regression
+combined_data<-combined_data %>%
+	select(pos,age.x,experience,g,mp,per,ts_percent,x3p_ar,f_tr,orb_percent,drb_percent,trb_percent,ast_percent,stl_percent,blk_percent,tov_percent,usg_percent,ows,dws,ws,ws_48,obpm,dbpm,bpm,vorp,playoffs,dpoy_winner,season)
+
+seasons_to2022 <- combined_data %>%
+  subset(season <= 2022) %>%
+  select(-season)
+
+seasons_2023 <- combined_data %>%
+  subset(season == 2023) %>%
+  select(-season)
+head(combined_data)
+
+set.seed(445)
+
+seasons_to2022_x<- data.matrix(data.frame(seasons_to2022 %>% select(-dpoy_winner) , stringsAsFactors = FALSE))
+
+seasons_to2022_y<- data.matrix(data.frame(seasons_to2022 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
+
+
+seasons_2023_x<- data.matrix(data.frame(seasons_2023 %>% select(-dpoy_winner) , stringsAsFactors = FALSE))
+
+seasons_2023_y<- data.matrix(data.frame(seasons_2023 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
+```
+
+## Models to Predict the Defensive player of the year
+
+-   Ridge Regression
+-   Lasso Regression
+-   Random Forest
+-   Classification Tree
+-   Linear Regression
+-   Logistic Regression
+-   Support Vector Machine
+
+## Ridge Regression
+
+```{r, echo=FALSE, include=FALSE}
+set.seed(445)
+ridge.train<-cv.glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
+                       family="binomial",
+                       alpha=0)
+
+best.lambda<- ridge.train$lambda.min
+best.lambda
+best.fit <- ridge.train$glmnet.fit
+summary(best.fit)
+best.fit
+coef(best.fit)
+
+ridge.train.best <- glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
+                       family="binomial",
+                       alpha=0,
+                       lambda=best.lambda)
+
+coef(ridge.train.best)
+
+ridge.pred <- predict(ridge.train.best, s=best.lambda, newx=seasons_2023_x, type="response")
+ridge.pred 
+
+confusion.glmnet(ridge.train.best,newx=seasons_2023_x, newy=seasons_2023_y)
+
+ridge.pred.prob <- predict(ridge.train.best, s=best.lambda, newx=seasons_2023_x, type="response") 
+ridge.pred.prob<-ifelse(ridge.pred.prob>0.5,T,F)
+seasons_2023$ridge.pred <- ridge.pred.prob[,1]
+s2023_ridge <- seasons_2023 %>% arrange(desc(ridge.pred))
+```
+
+-   Coefficients
+
+```{r, echo=FALSE}
+coef(ridge.train.best)
+# Ridge regression plot
+ridge_coefs<-data.frame(predictor=ridge.train.best$beta@Dimnames[[1]],coef=ridge.train.best$beta@x)
+
+ggplot(ridge_coefs)+
+geom_col(aes(x=predictor,y=coef),fill='blue')+
+geom_hline(yintercept=0)+
+theme(axis.text.x=element_text(angle=45,hjust=1,face='bold',size=12))+
+labs(y='Coefficient Value',title='Ridge Regression Coefficients', caption = "*dbpm - defensive box plus/minus \n *dws - defensive win shares \n *f_tr -  free throw rate \n *ts_percent - total shot percentage \n *ws_48 - win shares per 48 minutes \n *x3p_ar - 3-Point Attempt Rate")
+```
+
+-   Confusion Matrix with Accuracy
+
+```{r, echo=FALSE}
+confusion.glmnet(ridge.train.best,newx=seasons_2023_x, newy=seasons_2023_y)
+```
+
+-   Prediction in TRUE/FALSE
+
+```{R, echo=FALSE}
+s2023_ridge %>% select(tail(names(.), 2))
+```
+
+## Lasso Regression
+
+```{r, echo=FALSE, include=FALSE}
+set.seed(445)
+lasso.train.cv<-cv.glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
+                       family="binomial",
+                       alpha=1)
+
+best.lambda.lasso<- lasso.train.cv$lambda.min
+best.lambda.lasso
+best.fit.lasso <- lasso.train.cv$glmnet.fit
+summary(best.fit.lasso)
+best.fit.lasso
+coef(best.fit.lasso)
+lasso.train.best <- glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
+                       family="binomial",
+                       alpha=1,
+                       lambda=best.lambda.lasso,
+                       path=TRUE)
+
+lasso_timing<-system.time(
+glmnet(x = seasons_to2022_x, y = seasons_to2022_y, family="binomial", alpha=1, lambda=best.lambda.lasso,path=TRUE)
+)
+
+coef(lasso.train.best)
+
+lasso.pred <- predict(lasso.train.best, s=best.lambda, newx=seasons_2023_x, type="response")
+lasso.pred 
+confusion.glmnet(lasso.train.best,newx=seasons_2023_x, newy=seasons_2023_y)
+
+lasso.pred.prob <- predict(lasso.train.best, s=best.lambda, newx=seasons_2023_x, type="response") 
+lasso.pred.prob<-ifelse(lasso.pred.prob>0.5,T,F)
+seasons_2023$lasso.pred <- lasso.pred.prob[,1]
+
+s2023_lasso <- seasons_2023 %>% arrange(desc(lasso.pred))%>% select(-ridge.pred)
+```
+
+- Coefficients
+```{r, echo=FALSE}
+coef(lasso.train.best)
+
+# Lasso Regression plot
+lasso_coefs<-coef(lasso.train.best)
+lasso_coef_names<-lasso_coefs@Dimnames[[1]]
+lasso_coef_vals<-vector(length=length(lasso_coef_names))
+lasso_coef_vals[lasso_coefs@i +1]<-lasso_coefs@x
+lasso_coefs_df<-data.frame(predictor=lasso_coef_names,coef=lasso_coef_vals)
+lasso_coefs_df=subset(lasso_coefs_df, !coef==0)
+
+ggplot(lasso_coefs_df)+
+geom_col(aes(x=predictor,y=coef),fill='red')+
+theme(axis.text.x=element_text(angle=45,hjust=1,face='bold',size=12))+
+labs(y='Coefficient Value',title='Lasso Regression Coefficients', caption = "*dbpm - defensive box plus/minus \n *dws - defensive win shares \n *f_tr -  free throw rate \n *ts_percent - total shot percentage \n *x3p_ar - 3-Point Attempt Rate")
+```
+
+- Confusion Matrix with Accuracy
+```{r, echo=FALSE}
+confusion.glmnet(lasso.train.best,newx=seasons_2023_x, newy=seasons_2023_y)
+```
+
+- Prediction in TRUE/FALSE
+```{r, echo=FALSE}
+s2023_lasso %>% select(tail(names(.), 2))
+```
+
+## Random Forest
+
+```{r, echo=FALSE, include=FALSE}
+set.seed(445)
+randomforest <- randomForest(dpoy_winner~., 
+                             data=seasons_to2022,
+                             proximity=TRUE,
+                             ntree=1000,
+                             keep.forest=TRUE)
+randomforest
+
+rf.pred.to2022 <- predict(randomforest, seasons_to2022, type="prob")
+roc.rf.to2022 <- roc(seasons_to2022$dpoy_winner, rf.pred.to2022[,2])
+auc(roc.rf.to2022)
+plot(roc.rf.to2022)
+
+rf.pred1 <- predict(randomforest, seasons_2023, type="prob")
+rf.pred<-factor(apply(rf.pred1,1,function(x) ifelse(x[2]>0.5,T,F)))
+seasons_2023$rf.pred <-rf.pred
+s2023_rf <- seasons_2023 %>%arrange(desc(rf.pred)) %>% select(-ridge.pred, -lasso.pred)
+
+roc.rf <- roc(seasons_2023$dpoy_winner, rf.pred1[,2])
+```
+
+- ROC Curve
+```{r, echo=FALSE}
+auc(roc.rf)
+plot(roc.rf)
+```
+
+- Confusion Matrix with Accuracy
+```{r, echo=FALSE,warning=FALSE}
+confusionMatrix(rf.pred, factor(seasons_2023$dpoy_winner))
+```
+
+- Prediction in TRUE/FALSE
+```{r, echo=FALSE}
+s2023_rf %>% select(tail(names(.), 2))
+```
+
+## Decision tree
+```{r, echo=FALSE, include=FALSE}
+set.seed(445)
+library(rpart)
+library(rpart.plot)
+
+seasons_to2022 <- combined_data %>%
+  subset(season <= 2022) %>%
+  select(-season)
+
+ct_model<-rpart(dpoy_winner~.,data=seasons_to2022)
+ct_timing<-system.time(rpart(dpoy_winner~.,data=seasons_to2022))
+ct_pred<-predict(ct_model,seasons_2023)
+ct_pred<-factor(apply(ct_pred,1,function(x) ifelse(x[1]>x[2],F,T)))
+
+seasons_2023$ct.pred<-ct_pred
+
+s2023_dt <- seasons_2023 %>% arrange(desc(ct.pred)) %>% select(-ridge.pred, -lasso.pred, -rf.pred)
+```
+
+- Tree plot
+
+```{r, echo=FALSE}
+rpart.plot(ct_model)
+mtext("*dws - defensive win shares \n *dbpm - defensive box plus/minus \n *ast_percent - assist percentage", side = 3, line = -1, at = 1, adj = 1, cex = 0.8)
+```
+
+- Confusion Matrix with Accuracy
+```{r, echo=FALSE, warning=FALSE}
+confusionMatrix(ct_pred, factor(seasons_2023$dpoy_winner))
+```
+
+- Prediction in TRUE/FALSE
+```{r, echo=FALSE}
+s2023_dt %>% select(tail(names(.), 2))
+```
+
+## Linear Regression
+
+```{r,echo=FALSE, include=FALSE}
+# Read the datasets
+player_awards <- read.csv("Player Award Shares.csv")
+advanced_stats <- read.csv("Advanced.csv")
+
+# Check the unique values in the key columns
+print(unique(advanced_stats$player))
+print(unique(player_awards$player))
+print(unique(advanced_stats$season))
+print(unique(player_awards$season))
+
+# Merge the datasets
+combined_data <- merge(advanced_stats, player_awards, by = c("season", "player"))
+
+
+# Rename 'tm.x' to 'team' in combined_data
+combined_data <- combined_data %>%
+  rename(team = tm.x)
+
+team_abbrev <- read.csv("Team Abbrev.csv")
+team_abbrev <- team_abbrev %>%
+  rename(team_name = team, team = abbreviation)
+
+# Merge combined_data with team_abbrev
+combined_data <- merge(combined_data, team_abbrev, by = c("season", "team"))
+combined_data <- combined_data %>%
+  select(-c(age.y, tm.y, seas_id.y, player_id.y, lg.y))
+colnames(combined_data) <- tolower(colnames(combined_data))
+
+# Inspect the first few rows of the merged data
+head(combined_data)
+
+combined_data$dpoy_winner <- with(combined_data, as.factor(award == "dpoy" & winner == TRUE))
+
+combined_data <- combined_data %>%
+  filter(!is.na(season) & !is.na(award) & !is.na(winner) & 
+         !is.na(dws) & !is.na(blk_percent) & !is.na(stl_percent) & 
+         !is.na(trb_percent) & !is.na(dbpm) & !is.na(playoffs))
+
+combined_data <- combined_data %>%
+  select(-birth_year)
+
+# Check the updated dataset
+combined_data <- combined_data %>% filter(award == "dpoy")
+head(combined_data)
+
+
+seasons_2015to2022 <- combined_data %>%
+  filter(season <= 2022)
+seasons_2023 <- combined_data %>%
+  filter(season == 2023)
+
+seasons_2015to2022 %>% arrange(desc(dpoy_winner))
+
+set.seed(445)
+colnames(seasons_2015to2022)
+#Train data
+seasons_2015to2022_x<- data.frame(seasons_2015to2022 %>% select(-dpoy_winner) , stringsAsFactors = FALSE)
+
+seasons_2015to2022_y<- data.matrix(data.frame(seasons_2015to2022 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
+
+#Test data
+seasons_2023_x<- data.frame(seasons_2023 %>% select(-dpoy_winner) , stringsAsFactors = FALSE)
+
+seasons_2023_y<- data.matrix(data.frame(seasons_2023 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
+```
+
+```{r,echo=FALSE, include=FALSE}
+# Build the linear regression model
+lmDpoy <- lm(winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2015to2022_x)
+
+# Summary of the model
+summary(lmDpoy)
+
+# Optionally, you can make predictions with the model
+lmDpoyPred <- predict(lmDpoy, newdata = seasons_2015to2022_x)
+
+# View the head of the predictions
+head(lmDpoyPred)
+
+# Convert predictions to "TRUE" or "FALSE"
+binaryPredictions <- ifelse(lmDpoyPred > 0.5, "TRUE", "FALSE")
+
+# Convert both predictions and actual outcomes to the same type (character or factor)
+binaryPredictions <- as.character(binaryPredictions)
+actualOutcomes <- as.character(seasons_2015to2022_x$winner)
+
+# Calculate accuracy
+accuracy <- mean(binaryPredictions == actualOutcomes)
+
+# Assuming binaryPredictions and actualOutcomes are already computed as per your provided code
+```
+
+- Coefficients
+
+```{r,echo=FALSE}
+# Coefficient Importance Plot
+coef_data <- as.data.frame(coef(summary(lmDpoy)))
+coef_data$Predictor <- rownames(coef_data)
+coef_data$Coefficient <- abs(coef_data$Estimate) # Taking absolute for visualization
+
+ggplot(coef_data, aes(x = reorder(Predictor, Coefficient), y = Coefficient, fill = Coefficient)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +  # Make the plot horizontal
+  scale_fill_gradient(low = "blue", high = "red") + # Color gradient for visual appeal
+  labs(title = "Linear Regression Model Coefficients", x = "Predictors", y = "Effect Size (Absolute Coefficient)") +
+  theme_minimal()
+```
+
+```{r, echo=FALSE,include=FALSE}
+# Build the linear regression model
+lmDpoy <- lm(winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2023_x)
+
+# Summary of the model
+summary(lmDpoy)
+
+# Optionally, you can make predictions with the model
+lmDpoyPred <- predict(lmDpoy, newdata = seasons_2023_x)
+
+# View the head of the predictions
+head(lmDpoyPred)
+
+# Convert predictions to "TRUE" or "FALSE"
+binaryPredictions <- ifelse(lmDpoyPred > 0.5, "TRUE", "FALSE")
+
+# Convert both predictions and actual outcomes to the same type (character or factor)
+binaryPredictions <- as.character(binaryPredictions)
+actualOutcomes <- as.character(seasons_2023_x$winner)
+
+# Calculate accuracy
+accuracy <- mean(binaryPredictions == actualOutcomes)
+
+# Assuming binaryPredictions and actualOutcomes are already computed as per your provided code
+
+# Create the confusion matrix
+confMatrix <- table(Predicted = binaryPredictions, Actual = actualOutcomes)
+
+# Print the confusion matrix
+print(confMatrix)
+
+# Calculate accuracy
+accuracyCalc <- mean(binaryPredictions == actualOutcomes)
+print(accuracyCalc)
+
+
+# Print accuracy
+print(accuracy)
+
+# Assuming binaryPredictions and actualOutcomes are already computed
+
+# Combine predictions and actual outcomes into a new data frame
+comparison_df <- data.frame(
+  ActualOutcomes = actualOutcomes,
+  BinaryPredictions = binaryPredictions
+)
+
+# Print the first few rows of the comparison data frame
+print(comparison_df)
+```
+
+- Confusion Matrix with Accuracy
+```{r, echo=FALSE}
+# Create the confusion matrix
+confMatrix <- table(Predicted = binaryPredictions, Actual = actualOutcomes)
+
+# Print the confusion matrix
+print(confMatrix)
+
+# Calculate accuracy
+accuracyCalc <- mean(binaryPredictions == actualOutcomes)
+print(accuracyCalc)
+```
+
+- Prediction in TRUE/FALSE
+```{r, echo=FALSE}
+# Combine predictions and actual outcomes into a new data frame
+comparison_df <- data.frame(
+  ActualOutcomes = actualOutcomes,
+  BinaryPredictions = binaryPredictions
+)
+
+# Print the first few rows of the comparison data frame
+print(comparison_df)
+```
+
+## Logistic Regression
+```{r,echo=FALSE, include=FALSE}
+#Build the model 
+glmDpoy <- glm(winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2015to2022_x, family = "binomial")
+#glmDpoy <- glm(winner ~ ., data = seasons_2015to2022_x)
+
+#predict
+glmDpoyPred <- predict(glmDpoy, seasons_2015to2022_x, type = 'response')
+
+head(glmDpoyPred, 25)
+max(glmDpoyPred)
+
+#convert 1's and 0's back to true's and false's
+seasons_2015to2022_x$dpoyPred <- ifelse(glmDpoyPred >= .37725, "TRUE", "FALSE")
+#head(seasons_2015to2022_x$dpoyPred)
+
+#validate
+accuracy <- mean(seasons_2015to2022_x$dpoyPred == seasons_2015to2022_x$winner)
+accuracy
+
+head(seasons_2015to2022_x, 50)
+summary(glmDpoy)
+```
+
+- Coefficients
+
+```{r}
+# Coefficient Plot
+coef_data <- as.data.frame(coef(summary(glmDpoy)))
+coef_data$Predictor <- rownames(coef_data)
+coef_data$Coefficient <- abs(coef_data$Estimate) # Taking absolute for visualization
+
+ggplot(coef_data, aes(x = reorder(Predictor, Coefficient), y = Coefficient, fill = Coefficient)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +  # Make the plot horizontal
+  scale_fill_gradient(low = "blue", high = "red") + # Color gradient for visual appeal
+  labs(title = "Lasso Regression Model Coefficients", x = "Predictors", y = "Effect Size (Absolute Coefficient)") +
+  theme_minimal()
+```
+
+```{r, echo=FALSE, include=FALSE}
+#Build the model 
+glmDpoy <- glm(winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2023_x, family = "binomial")
+
+#predict
+glmDpoyPred <- predict(glmDpoy, seasons_2023_x, type = 'response')
+
+head(glmDpoyPred, 25)
+max(glmDpoyPred)
+
+#convert 1's and 0's back to true's and false's
+seasons_2023_x$dpoyPred <- ifelse(glmDpoyPred >= .37725, "TRUE", "FALSE")
+#head(seasons_2015to2022_x$dpoyPred)
+
+#validate
+accuracy <- mean(seasons_2023_x$dpoyPred == seasons_2023_x$winner)
+accuracy
+
+# Create the confusion matrix
+confMatrix <- table(Predicted = seasons_2023_x$dpoyPred, Actual = seasons_2023_x$winner)
+
+# Print the confusion matrix
+print(confMatrix)
+
+# Calculate accuracy (optional, as you already have it)
+accuracyCalc <- sum(diag(confMatrix)) / sum(confMatrix)
+print(accuracyCalc)
+
+
+select(seasons_2023_x, winner, dpoyPred)
+summary(glmDpoy)
+```
+
+- Confusion Matrix with Accuracy
+```{r, echo=FALSE, warning=FALSE}
+glmDpoyPredTest <- predict(glmDpoy, seasons_2023_x, type = 'response')
+seasons_2023_x$dpoyPredTest <- ifelse(glmDpoyPredTest >= .37725, "TRUE", "FALSE")
+
+
+confMatrixTest <- table(Predicted = seasons_2023_x$dpoyPredTest, Actual = seasons_2023_x$winner)
+print(confMatrixTest)
+
+accuracyTest <- mean(seasons_2023_x$dpoyPredTest == seasons_2023_x$winner)
+print(accuracyTest)
+```
+
+- Prediction in TRUE/FALSE
+```{r, echo=FALSE}
+select(seasons_2023_x, winner, dpoyPredTest)
+```
+
+## Support Vector Machine
+```{r,echo=FALSE,include=FALSE}
+svmDpoy <- svm(formula = winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2015to2022_x, type = 'C-classification', kernel = 'radial', gamma = 1)
+
+predDpoySVM <- predict(svmDpoy, seasons_2015to2022_x)
+head(predDpoySVM)
+
+cm <- table(predDpoySVM, seasons_2015to2022_x$winner)
+cm
+
+tp <- cm[4]
+fp <- cm[3]
+tn <- cm[1]
+fn <- cm[2]
+
+accuracy2 <- sum((tp + tn)/(tp + tn + fp + fn))
+accuracy2
+precision <- sum(tp/(tp + fp))
+precision
+recall <- sum(tp/(tp + fn)) 
+recall
+f1 <- sum(2*(precision*recall)/(precision + recall))
+f1
+```
+
+```{r, echo=FALSE}
+# Construct a data frame with the performance metrics
+metrics <- data.frame(
+  Metric = c("Accuracy", "Precision", "Recall", "F1 Score"),
+  Value = c(accuracy2, precision, recall, f1)
+)
+
+# Create a bar plot for performance metrics
+ggplot(metrics, aes(x = Metric, y = Value, fill = Metric)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  scale_fill_brewer(palette = "Pastel1") +
+  ylim(0, 1) +  # Assuming your metrics are between 0 and 1
+  labs(y = "Score", title = "Performance Metrics for SVM Model") +
+  theme_minimal()
+```
+
+```{r, echo=FALSE, include=FALSE}
+svmDpoy <- svm(formula = winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2023_x, type = 'C-classification', kernel = 'radial', gamma = 1)
+
+predDpoySVM <- predict(svmDpoy, seasons_2023_x)
+head(predDpoySVM)
+
+cm <- table(predDpoySVM, seasons_2023_x$winner)
+cm
+
+tp <- cm[4]
+fp <- cm[3]
+tn <- cm[1]
+fn <- cm[2]
+
+accuracy2 <- sum((tp + tn)/(tp + tn + fp + fn))
+accuracy2
+precision <- sum(tp/(tp + fp))
+precision
+recall <- sum(tp/(tp + fn)) 
+recall
+f1 <- sum(2*(precision*recall)/(precision + recall))
+f1
+
+# Assuming predDpoySVM (predicted values by SVM) and actual outcomes (seasons_2015to2022_x$winner) are already computed
+
+# Combine the SVM predicted values and actual outcomes into a new data frame
+comparison_df_svm <- data.frame(
+  ActualOutcomes = seasons_2023_x$winner,
+  PredictedValuesSVM = predDpoySVM
+)
+
+# Print the first few rows of the comparison data frame
+print(comparison_df_svm)
+```
+
+- Confusion Matrix with Accuracy
+```{r, echo=FALSE}
+predDpoySVMTest <- predict(svmDpoy, seasons_2023_x)
+
+cmTest <- table(Predicted = predDpoySVMTest, Actual = seasons_2023_x$winner)
+print(cmTest)
+# Assuming cmTest is the confusion matrix from the SVM predictions on the test data
+tpTest <- cmTest[2, 2] # True Positives are typically at position [2, 2] of the matrix
+tnTest <- cmTest[1, 1] # True Negatives are typically at position [1, 1] of the matrix
+totalCasesTest <- sum(cmTest) # Total number of cases
+
+# Calculate accuracy
+accuracySVMTest <- (tpTest + tnTest) / totalCasesTest
+print(accuracySVMTest)
+```
+
+- Prediction in TRUE/FALSE
+```{r, echo=FALSE}
+svmDpoy <- svm(formula = winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2023_x, type = 'C-classification', kernel = 'radial', gamma = 1)
+
+predDpoySVM <- predict(svmDpoy, seasons_2023_x)
+
+# Assuming predDpoySVM (predicted values by SVM) and actual outcomes (seasons_2015to2022_x$winner) are already computed
+
+# Combine the SVM predicted values and actual outcomes into a new data frame
+comparison_df_svm <- data.frame(
+  ActualOutcomes = seasons_2023_x$winner,
+  PredictedValuesSVM = predDpoySVM
+)
+
+# Print the first few rows of the comparison data frame
+print(comparison_df_svm)
+```
