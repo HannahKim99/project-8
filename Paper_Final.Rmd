@@ -5,26 +5,735 @@ date: "2023-12-12"
 output: pdf_document
 ---
 
-## Motivation
-This paper explores the application of various machine learning models to predict the NBA Defensive Player of the Year (DPOY) award winners from 1983 to 2023. Utilizing a comprehensive dataset from Kaggle, which includes individual player statistics, team success metrics, and award information, we examined models like Ridge Regression, Lasso, Random Forest, Linear Regression, Classification Tree, Logistic Regression, and radial SVM. Our analysis reveals that more complex models, particularly the radial SVM, significantly outperform simpler models, with some key predictors being playoff appearances and defensive win shares (DWS).
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, include=FALSE}
+library(tidymodels)
+library(randomForest)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(pROC)
+library(glmnet)
+library(e1071)
+```
+
+```{r, echo=FALSE, include=FALSE}
+# Read the datasets
+player_awards <- read.csv("Player Award Shares.csv")
+advanced_stats <- read.csv("Advanced.csv")
+
+# Check the unique values in the key columns
+#print(unique(advanced_stats$player))
+#print(unique(player_awards$player))
+#print(unique(advanced_stats$season))
+#print(unique(player_awards$season))
+
+# Merge the datasets
+combined_data <- merge(advanced_stats, player_awards, by = c("season", "player"))
+
+# Rename 'tm.x' to 'team' in combined_data
+combined_data <- combined_data %>%
+  rename(team = tm.x)
+
+team_abbrev <- read.csv("Team Abbrev.csv")
+team_abbrev <- team_abbrev %>%
+  rename(team_name = team, team = abbreviation)
+
+# Merge combined_data with team_abbrev
+combined_data <- merge(combined_data, team_abbrev, by = c("season", "team"))
+combined_data <- combined_data %>%
+  select(-c(age.y, tm.y, seas_id.y, player_id.y, lg.y))
+colnames(combined_data) <- tolower(colnames(combined_data))
+
+combined_data$dpoy_winner <- with(combined_data, as.factor(award == "dpoy" & winner == TRUE))
+
+combined_data <- combined_data %>%
+  subset(!is.na(season) & !is.na(award) & !is.na(winner) & 
+         !is.na(dws) & !is.na(blk_percent) & !is.na(stl_percent) & 
+         !is.na(trb_percent) & !is.na(dbpm) & !is.na(playoffs))
+
+combined_data <- combined_data %>%
+  select(-birth_year)
+
+combined_data <- combined_data %>% subset(award == "dpoy")
+
+# only keep variables that seem good for regression
+combined_data<-combined_data %>%
+	select(pos,age.x,experience,g,mp,per,ts_percent,x3p_ar,f_tr,orb_percent,drb_percent,trb_percent,ast_percent,stl_percent,blk_percent,tov_percent,usg_percent,ows,dws,ws,ws_48,obpm,dbpm,bpm,vorp,playoffs,dpoy_winner,season)
+
+seasons_to2022 <- combined_data %>%
+  subset(season <= 2022) %>%
+  select(-season)
+
+seasons_2023 <- combined_data %>%
+  subset(season == 2023) %>%
+  select(-season)
+head(combined_data)
+
+#seasons_to2022 %>% arrange(desc(dpoy_winner))
+
+set.seed(445)
+
+seasons_to2022_x<- data.matrix(data.frame(seasons_to2022 %>% select(-dpoy_winner) , stringsAsFactors = FALSE))
+
+seasons_to2022_y<- data.matrix(data.frame(seasons_to2022 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
+
+
+seasons_2023_x<- data.matrix(data.frame(seasons_2023 %>% select(-dpoy_winner) , stringsAsFactors = FALSE))
+
+seasons_2023_y<- data.matrix(data.frame(seasons_2023 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
+```
+
+```{r, echo=FALSE, include=FALSE}
+#ridge model
+set.seed(445)
+ridge.train<-cv.glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
+                       family="binomial",
+                       alpha=0)
+
+best.lambda<- ridge.train$lambda.min
+best.lambda
+best.fit <- ridge.train$glmnet.fit
+summary(best.fit)
+best.fit
+coef(best.fit)
+
+ridge.train.best <- glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
+                       family="binomial",
+                       alpha=0,
+                       lambda=best.lambda)
+
+coef(ridge.train.best)
+
+ridge.pred <- predict(ridge.train.best, s=best.lambda, newx=seasons_2023_x, type="response")
+ridge.pred 
+
+confusion.glmnet(ridge.train.best,newx=seasons_2023_x, newy=seasons_2023_y)
+
+ridge.pred.prob <- predict(ridge.train.best, s=best.lambda, newx=seasons_2023_x, type="response") 
+ridge.pred.prob<-ifelse(ridge.pred.prob>0.5,T,F)
+seasons_2023$ridge.pred <- ridge.pred.prob[,1]
+s2023_ridge <- seasons_2023 %>% arrange(desc(ridge.pred))
+```
+
+```{r, echo=FALSE, include=FALSE}
+#lasso model
+set.seed(445)
+lasso.train.cv<-cv.glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
+                       family="binomial",
+                       alpha=1)
+
+best.lambda.lasso<- lasso.train.cv$lambda.min
+best.lambda.lasso
+best.fit.lasso <- lasso.train.cv$glmnet.fit
+summary(best.fit.lasso)
+best.fit.lasso
+coef(best.fit.lasso)
+lasso.train.best <- glmnet(x = seasons_to2022_x,
+                       y = seasons_to2022_y,
+                       family="binomial",
+                       alpha=1,
+                       lambda=best.lambda.lasso,
+                       path=TRUE)
+
+lasso_timing<-system.time(
+glmnet(x = seasons_to2022_x, y = seasons_to2022_y, family="binomial", alpha=1, lambda=best.lambda.lasso,path=TRUE)
+)
+
+coef(lasso.train.best)
+
+lasso.pred <- predict(lasso.train.best, s=best.lambda, newx=seasons_2023_x, type="response")
+lasso.pred 
+confusion.glmnet(lasso.train.best,newx=seasons_2023_x, newy=seasons_2023_y)
+
+lasso.pred.prob <- predict(lasso.train.best, s=best.lambda, newx=seasons_2023_x, type="response") 
+lasso.pred.prob<-ifelse(lasso.pred.prob>0.5,T,F)
+seasons_2023$lasso.pred <- lasso.pred.prob[,1]
+
+s2023_lasso <- seasons_2023 %>% arrange(desc(lasso.pred))%>% select(-ridge.pred)
+```
+
+```{r, echo=FALSE, include=FALSE}
+#random forest model
+set.seed(445)
+randomforest <- randomForest(dpoy_winner~., 
+                             data=seasons_to2022,
+                             proximity=TRUE,
+                             ntree=1000,
+                             keep.forest=TRUE)
+randomforest
+
+rf.pred.to2022 <- predict(randomforest, seasons_to2022, type="prob")
+roc.rf.to2022 <- roc(seasons_to2022$dpoy_winner, rf.pred.to2022[,2])
+auc(roc.rf.to2022)
+plot(roc.rf.to2022)
+
+rf.pred1 <- predict(randomforest, seasons_2023, type="prob")
+rf.pred<-factor(apply(rf.pred1,1,function(x) ifelse(x[2]>0.5,T,F)))
+seasons_2023$rf.pred <-rf.pred
+s2023_rf <- seasons_2023 %>%arrange(desc(rf.pred)) %>% select(-ridge.pred, -lasso.pred)
+
+roc.rf <- roc(seasons_2023$dpoy_winner, rf.pred1[,2])
+```
+
+```{r, echo=FALSE, include=FALSE}
+#decision tree model
+set.seed(445)
+library(rpart)
+library(rpart.plot)
+
+seasons_to2022 <- combined_data %>%
+  subset(season <= 2022) %>%
+  select(-season)
+
+ct_model<-rpart(dpoy_winner~.,data=seasons_to2022)
+ct_timing<-system.time(rpart(dpoy_winner~.,data=seasons_to2022))
+ct_pred<-predict(ct_model,seasons_2023)
+ct_pred<-factor(apply(ct_pred,1,function(x) ifelse(x[1]>x[2],F,T)))
+
+seasons_2023$ct.pred<-ct_pred
+
+s2023_dt <- seasons_2023 %>% arrange(desc(ct.pred)) %>% select(-ridge.pred, -lasso.pred, -rf.pred)
+```
+
+## Abstract
+This paper explores the application of various machine learning models to predict the NBA Defensive Player of the Year (DPOY) award winners from 1983 to 2023. Utilizing a comprehensive dataset from Kaggle, which includes individual player statistics, team success metrics, and award information, we examined various models for our prediction. Our analysis reveals that more complex models, particularly the radial Support Vector Machine, significantly outperform simpler models, with some key predictors being playoff appearances and defensive win shares (DWS).
 
 The NBA Defensive Player of the Year award, a prestigious accolade in professional basketball, recognizes the league's best defensive player each season. Predicting the winner of this award not only has implications in the realm of sports analytics, but also offers insights for sports betting enthusiasts. Our project aims to apply machine learning techniques learned in our class to predict DPOY winners, bridging the gap between academic knowledge and practical application in sports analytics and gambling. This project is motivated by a fascination with the intersection of sports, data analytics, and betting, combined with an academic interest in validating the effectiveness of these machine learning models in real-world scenarios. The dynamic, unpredictable nature of sports achievements, or awards, presents us with a unique challenge for predictive modeling.
 
-## Methodology
-We sourced our data from a Kaggle dataset comprising player and team performance metrics from 1983 to 2023. Some key features included team playoff participation (Playoffs), defensive win shares (DWS), and defensive box plus minus (DBPM), minutes played(MP), etc. Our methodology involved training various models (Ridge Regression, Lasso, Random Forest, Linear Regression, Logistic Regression, and radial SVM) and splitting the data into training and testing sets. Furthermore, we adjusted our training data to only include candidates for the award, so our model could get better acquainted with the parameters that actually mattered for predicting the winner. 
+## Dataset
+We sourced our data from a Kaggle dataset comprising player and team performance metrics. We adjusted our data to only include DPOY candidates, so our model could get better acquainted with the parameters that actually mattered for predicting the DPOY winner. The dpoy_winner which indicates if the player has won or not, used as our response variable and the statistics of each player used as our predictors. However, some key features we focus on were team playoff participation (Playoffs), defensive win shares (DWS), and defensive box plus minus (DBPM), minutes played(MP), etc. Furthermore, we split the data into training and testing data by season. Our training data spans from 1983 to 2022 season, which provides whole historical perspective. For evaluating the model's performance, we used the 2023 season as our testing data.
 
-The rationale for including Ridge Regression, Lasso, and Linear Regression was to explore how models typically not tailored for classification tasks would perform in predicting the DPOY winner. Interestingly, while there was some overlap in the influential predictors identified by both sets of models, the regression techniques also highlighted some unexpected choices as the most influential predictors, such as “ws_48”, which no classification models had as an impactful parameter. Only proving that they weren’t as well suited for the task.
+## Methodology & Results
+We examined Ridge Regression, Lasso, Random Forest, Linear Regression, Classification Tree, Logistic Regression, and radial Support Vector Machine models for our prediction. The rationale for including Ridge Regression, Lasso, and Linear Regression was to explore how models typically not tailored for classification tasks would perform in predicting the DPOY winner. Interestingly, while there was some overlap in the influential predictors identified by both sets of models, the regression techniques also highlighted some unexpected choices as the most influential predictors, such as “ws_48”, which no classification models had as an impactful parameter. Only proving that they weren’t as well suited for the task.
 
-The core of our analysis centered on the classification models, with SVM emerging as the most effective in predicting the DPOY winner. This finding was supported by the performance of Random Forest and Classification Tree models, which also proved to be more useful than the regression models.
+The core of our analysis centered on the classification models, with Support Vector Machine emerging as the most effective in predicting the DPOY winner. This finding was supported by the performance of Random Forest and Classification Tree models, which also proved to be more useful than the regression models.
 
-To assess the accuracy and performance of these models, we employed confusion matrices and compared the predicted outcomes against actual results. Our methodologies involved an initial phase of training the models with training data, followed by optimization processes to fine-tune their predictive capabilities. Subsequently, the models were tested with a separate set of test data to validate their predictive accuracy. The SVM model consistently demonstrated the highest accuracy in these tests, affirming its suitability for predicting the DPOY winner in the NBA.
+### Confusion matrix with Accuracy
 
-## Results
-The radial SVM model demonstrated the highest accuracy, with ~ 98% on training data and 100% on the test set. Comparatively, other models showed varying degrees of accuracy, from ~ 84% - 93%, with complex, classification, models generally outperforming regression models (Linear Regression, etc.). The most significant predictors of DPOY winners were found to be playoff appearances and DWS, and DBPM. We found a lot of the defensive predictors we thought would be influential weren’t. This we found, was do to the fact the statistics DBPM and DWS already take into account these other defensive stats. These stats included defensive rebounds, steals, blocks, etc. This led to what looks like few things playing into who the winner is, when in reality there are many factors rolled into these few.
+#### - Ridge regression
 
-The superior performance of the SVM model is attributed to its efficacy in classifying binary outcomes, which aligns well with the "win or lose" nature of the DPOY award. Our project demonstrates the potential of advanced machine learning models, particularly SVM, in accurately predicting sports awards. We believe these methods can be applied to any sports awards wherein you have the adequate data, winner information, individual stats, team stats, etc. That being said, these findings have implications for sports betting and the broader field of sports analytics. Future research could explore the incorporation of more diverse data sources, exploring different predictors and different classifications models.
+- Training data
+```{r, echo=FALSE, warning=FALSE}
+ridge_pred_prob <- predict(ridge.train.best, newx = seasons_to2022_x, s = best.lambda, type = "response")
+
+# Convert probabilities to binary predictions
+ridge_pred <- ifelse(ridge_pred_prob > 0.5, TRUE, FALSE)
+
+# Create a confusion matrix manually
+conf_matrix_ridge <- table(Actual = seasons_to2022_y, Predicted = ridge_pred)
+
+# Change row names
+rownames(conf_matrix_ridge) <- c("False", "True")
+
+accuracy_ridge <- sum(diag(conf_matrix_ridge)) / sum(conf_matrix_ridge)
+
+conf_matrix_ridge
+accuracy_ridge
+```
+- Test data
+```{r, echo=FALSE, warning=FALSE}
+ridge_pred_prob <- predict(ridge.train.best, newx = seasons_2023_x, s = best.lambda, type = "response")
+
+# Convert probabilities to binary predictions
+ridge_pred <- ifelse(ridge_pred_prob > 0.5, TRUE, FALSE)
+
+# Create a confusion matrix manually
+conf_matrix_ridge <- table(Actual = seasons_2023_y, Predicted = ridge_pred)
+
+# Change row names
+rownames(conf_matrix_ridge) <- c("False", "True")
+
+accuracy_ridge <- sum(diag(conf_matrix_ridge)) / sum(conf_matrix_ridge)
+
+conf_matrix_ridge
+accuracy_ridge
+```
+
+#### - Lasso regression
+
+- Training data
+```{r, echo=FALSE, warning=FALSE}
+lasso_pred_prob <- predict(lasso.train.best, newx = seasons_to2022_x, s = best.lambda, type = "response")
+
+# Convert probabilities to binary predictions
+lasso_pred <- ifelse(lasso_pred_prob > 0.5, TRUE, FALSE)
+
+# Create a confusion matrix manually
+conf_matrix_ridge <- table(Actual = seasons_to2022_y, Predicted = lasso_pred)
+
+# Change row names
+rownames(conf_matrix_ridge) <- c("False", "True")
+
+accuracy_ridge <- sum(diag(conf_matrix_ridge)) / sum(conf_matrix_ridge)
+
+conf_matrix_ridge
+accuracy_ridge
+```
+- Test data
+```{r, echo=FALSE, warning=FALSE}
+lasso_pred_prob <- predict(lasso.train.best, newx = seasons_2023_x, s = best.lambda, type = "response")
+
+# Convert probabilities to binary predictions
+lasso_pred <- ifelse(lasso_pred_prob > 0.5, TRUE, FALSE)
+
+# Create a confusion matrix manually
+conf_matrix_ridge <- table(Actual = seasons_2023_y, Predicted = lasso_pred)
+
+# Change row names
+rownames(conf_matrix_ridge) <- c("False", "True")
+
+accuracy_ridge <- sum(diag(conf_matrix_ridge)) / sum(conf_matrix_ridge)
+
+conf_matrix_ridge
+accuracy_ridge
+```
+
+#### - Random Forest 
+
+- Training data
+```{r, echo=FALSE, warning=FALSE}
+rf.pred.to2022 <- predict(randomforest, seasons_to2022, type="response")
+conf_matrix_rf.to2022 <- confusionMatrix(rf.pred.to2022, seasons_to2022$dpoy_winner)
+conf_matrix_rf.to2022$table
+conf_matrix_rf.to2022$overall["Accuracy"]
+```
+- Test data
+```{r, echo=FALSE, warning=FALSE}
+conf_matrix_rf <- confusionMatrix(rf.pred, factor(seasons_2023$dpoy_winner))
+conf_matrix_rf$table
+conf_matrix_rf$overall["Accuracy"]
+```
+
+#### - Decision Tree
+
+- Training data
+```{r, echo=FALSE, warning=FALSE}
+ct_model <- rpart(dpoy_winner ~ ., data = seasons_to2022)
+ct_pred_to2022 <- predict(ct_model, seasons_to2022)
+ct_pred_to2022 <- factor(apply(ct_pred_to2022, 1, function(x) ifelse(x[1] > x[2], F, T)))
+
+conf_matrix_dt_to2022 <- confusionMatrix(ct_pred_to2022, seasons_to2022$dpoy_winner)
+conf_matrix_dt_to2022$table
+conf_matrix_dt_to2022$overall["Accuracy"]
+```
+
+- Test data
+```{r, echo=FALSE, warning=FALSE}
+conf_matrix_dt <- confusionMatrix(ct_pred, factor(seasons_2023$dpoy_winner))
+conf_matrix_dt$table
+conf_matrix_dt$overall["Accuracy"]
+```
+
+```{r,echo=FALSE, include=FALSE}
+# Read the datasets
+player_awards <- read.csv("Player Award Shares.csv")
+advanced_stats <- read.csv("Advanced.csv")
+
+# Check the unique values in the key columns
+print(unique(advanced_stats$player))
+print(unique(player_awards$player))
+print(unique(advanced_stats$season))
+print(unique(player_awards$season))
+
+# Merge the datasets
+combined_data <- merge(advanced_stats, player_awards, by = c("season", "player"))
+
+
+# Rename 'tm.x' to 'team' in combined_data
+combined_data <- combined_data %>%
+  rename(team = tm.x)
+
+team_abbrev <- read.csv("Team Abbrev.csv")
+team_abbrev <- team_abbrev %>%
+  rename(team_name = team, team = abbreviation)
+
+# Merge combined_data with team_abbrev
+combined_data <- merge(combined_data, team_abbrev, by = c("season", "team"))
+combined_data <- combined_data %>%
+  select(-c(age.y, tm.y, seas_id.y, player_id.y, lg.y))
+colnames(combined_data) <- tolower(colnames(combined_data))
+
+# Inspect the first few rows of the merged data
+head(combined_data)
+
+combined_data$dpoy_winner <- with(combined_data, as.factor(award == "dpoy" & winner == TRUE))
+
+combined_data <- combined_data %>%
+  filter(!is.na(season) & !is.na(award) & !is.na(winner) & 
+         !is.na(dws) & !is.na(blk_percent) & !is.na(stl_percent) & 
+         !is.na(trb_percent) & !is.na(dbpm) & !is.na(playoffs))
+
+combined_data <- combined_data %>%
+  select(-birth_year)
+
+# Check the updated dataset
+combined_data <- combined_data %>% filter(award == "dpoy")
+head(combined_data)
+
+
+seasons_2015to2022 <- combined_data %>%
+  filter(season <= 2022)
+seasons_2023 <- combined_data %>%
+  filter(season == 2023)
+
+seasons_2015to2022 %>% arrange(desc(dpoy_winner))
+
+set.seed(445)
+colnames(seasons_2015to2022)
+#Train data
+seasons_2015to2022_x<- data.frame(seasons_2015to2022 %>% select(-dpoy_winner) , stringsAsFactors = FALSE)
+
+seasons_2015to2022_y<- data.matrix(data.frame(seasons_2015to2022 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
+
+#Test data
+seasons_2023_x<- data.frame(seasons_2023 %>% select(-dpoy_winner) , stringsAsFactors = FALSE)
+
+seasons_2023_y<- data.matrix(data.frame(seasons_2023 %>% select(dpoy_winner) , stringsAsFactors = FALSE))
+```
+
+
+#### - Linear regression
+- Training data
+```{r, echo=FALSE,include=FALSE}
+# Assuming you have the dataset 'seasons_2015to2022_x' and the outcome variable 'winner'
+
+# Build the linear regression model
+lmDpoy <- lm(winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2015to2022_x)
+
+# Summary of the model
+summary(lmDpoy)
+
+# Optionally, you can make predictions with the model
+lmDpoyPred <- predict(lmDpoy, newdata = seasons_2015to2022_x)
+
+# View the head of the predictions
+head(lmDpoyPred)
+
+# Convert predictions to "TRUE" or "FALSE"
+binaryPredictions <- ifelse(lmDpoyPred > 0.5, "TRUE", "FALSE")
+
+# Convert both predictions and actual outcomes to the same type (character or factor)
+binaryPredictions <- as.character(binaryPredictions)
+actualOutcomes <- as.character(seasons_2015to2022_x$winner)
+
+# Calculate accuracy
+accuracy <- mean(binaryPredictions == actualOutcomes)
+
+# Assuming binaryPredictions and actualOutcomes are already computed as per your provided code
+
+# Create the confusion matrix
+confMatrix <- table(Predicted = binaryPredictions, Actual = actualOutcomes)
+
+# Print the confusion matrix
+print(confMatrix)
+
+# Calculate accuracy
+accuracyCalc <- mean(binaryPredictions == actualOutcomes)
+print(accuracyCalc)
+
+
+# Print accuracy
+print(accuracy)
+
+# Assuming binaryPredictions and actualOutcomes are already computed
+
+# Combine predictions and actual outcomes into a new data frame
+comparison_df <- data.frame(
+  ActualOutcomes = actualOutcomes,
+  BinaryPredictions = binaryPredictions
+)
+
+# Print the first few rows of the comparison data frame
+print(comparison_df)
+```
+
+```{r,echo=FALSE}
+# Create the confusion matrix
+confMatrix <- table(Predicted = binaryPredictions, Actual = actualOutcomes)
+
+# Print the confusion matrix
+print(confMatrix)
+
+# Calculate accuracy
+accuracyCalc <- mean(binaryPredictions == actualOutcomes)
+print(accuracyCalc)
+```
+
+```{r,echo=FALSE, include=FALSE}
+# linear regression model
+lmDpoy <- lm(winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2023_x)
+
+# Summary of the model
+summary(lmDpoy)
+
+# Optionally, you can make predictions with the model
+lmDpoyPred <- predict(lmDpoy, newdata = seasons_2023_x)
+
+# View the head of the predictions
+head(lmDpoyPred)
+
+# Convert predictions to "TRUE" or "FALSE"
+binaryPredictions <- ifelse(lmDpoyPred > 0.5, "TRUE", "FALSE")
+
+# Convert both predictions and actual outcomes to the same type (character or factor)
+binaryPredictions <- as.character(binaryPredictions)
+actualOutcomes <- as.character(seasons_2023_x$winner)
+
+# Calculate accuracy
+accuracy <- mean(binaryPredictions == actualOutcomes)
+
+# Assuming binaryPredictions and actualOutcomes are already computed as per your provided code
+
+# Create the confusion matrix
+confMatrix <- table(Predicted = binaryPredictions, Actual = actualOutcomes)
+
+# Print the confusion matrix
+print(confMatrix)
+
+# Calculate accuracy
+accuracyCalc <- mean(binaryPredictions == actualOutcomes)
+print(accuracyCalc)
+
+
+# Print accuracy
+print(accuracy)
+
+# Assuming binaryPredictions and actualOutcomes are already computed
+
+# Combine predictions and actual outcomes into a new data frame
+comparison_df <- data.frame(
+  ActualOutcomes = actualOutcomes,
+  BinaryPredictions = binaryPredictions
+)
+
+# Print the first few rows of the comparison data frame
+print(comparison_df)
+```
+
+- Test data
+```{r, echo=FALSE}
+# Create the confusion matrix
+confMatrix <- table(Predicted = binaryPredictions, Actual = actualOutcomes)
+
+# Print the confusion matrix
+print(confMatrix)
+
+# Calculate accuracy
+accuracyCalc <- mean(binaryPredictions == actualOutcomes)
+print(accuracyCalc)
+```
+
+#### - Logistic regression
+-  Training data
+
+```{r, echo=FALSE, include=FALSE}
+#Build the model 
+glmDpoy <- glm(winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2015to2022_x, family = "binomial")
+#glmDpoy <- glm(winner ~ ., data = seasons_2015to2022_x)
+
+#predict
+glmDpoyPred <- predict(glmDpoy, seasons_2015to2022_x, type = 'response')
+
+head(glmDpoyPred, 25)
+max(glmDpoyPred)
+
+#convert 1's and 0's back to true's and false's
+seasons_2015to2022_x$dpoyPred <- ifelse(glmDpoyPred >= .37725, "TRUE", "FALSE")
+#head(seasons_2015to2022_x$dpoyPred)
+
+#validate
+accuracy <- mean(seasons_2015to2022_x$dpoyPred == seasons_2015to2022_x$winner)
+accuracy
+
+# Assuming glmDpoyPred and seasons_2015to2022_x$dpoyPred are already computed as per your provided code
+
+# Create the confusion matrix
+confMatrix <- table(Predicted = seasons_2015to2022_x$dpoyPred, Actual = seasons_2015to2022_x$winner)
+
+# Print the confusion matrix
+print(confMatrix)
+
+# Calculate accuracy (optional, as you already have it)
+accuracyCalc <- sum(diag(confMatrix)) / sum(confMatrix)
+print(accuracyCalc)
+```
+
+```{r, echo=FALSE, warning=FALSE}
+glmDpoyPredTest <- predict(glmDpoy, seasons_2015to2022_x, type = 'response')
+seasons_2015to2022_x$dpoyPredTest <- ifelse(glmDpoyPredTest >= .37725, "TRUE", "FALSE")
+
+
+confMatrixTest <- table(Predicted = seasons_2015to2022_x$dpoyPredTest, Actual = seasons_2015to2022_x$winner)
+print(confMatrixTest)
+
+accuracyTest <- mean(seasons_2015to2022_x$dpoyPredTest == seasons_2015to2022_x$winner)
+print(accuracyTest)
+```
+
+```{r, echo=FALSE, include=FALSE}
+#Build the model 
+glmDpoy <- glm(winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2023_x, family = "binomial")
+
+#predict
+glmDpoyPred <- predict(glmDpoy, seasons_2023_x, type = 'response')
+
+head(glmDpoyPred, 25)
+max(glmDpoyPred)
+
+#convert 1's and 0's back to true's and false's
+seasons_2023_x$dpoyPred <- ifelse(glmDpoyPred >= .37725, "TRUE", "FALSE")
+#head(seasons_2015to2022_x$dpoyPred)
+
+#validate
+accuracy <- mean(seasons_2023_x$dpoyPred == seasons_2023_x$winner)
+accuracy
+
+# Create the confusion matrix
+confMatrix <- table(Predicted = seasons_2023_x$dpoyPred, Actual = seasons_2023_x$winner)
+
+# Print the confusion matrix
+print(confMatrix)
+
+# Calculate accuracy (optional, as you already have it)
+accuracyCalc <- sum(diag(confMatrix)) / sum(confMatrix)
+print(accuracyCalc)
+
+
+select(seasons_2023_x, winner, dpoyPred)
+summary(glmDpoy)
+```
+
+- Test data
+```{r, echo=FALSE, warning=FALSE}
+glmDpoyPredTest <- predict(glmDpoy, seasons_2023_x, type = 'response')
+seasons_2023_x$dpoyPredTest <- ifelse(glmDpoyPredTest >= .37725, "TRUE", "FALSE")
+
+
+confMatrixTest <- table(Predicted = seasons_2023_x$dpoyPredTest, Actual = seasons_2023_x$winner)
+print(confMatrixTest)
+
+accuracyTest <- mean(seasons_2023_x$dpoyPredTest == seasons_2023_x$winner)
+print(accuracyTest)
+```
+
+#### - Support Vector Machine
+- Training data
+```{r, echo=FALSE, include=FALSE}
+svmDpoy <- svm(formula = winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2015to2022_x, type = 'C-classification', kernel = 'radial', gamma = 1)
+
+predDpoySVM <- predict(svmDpoy, seasons_2015to2022_x)
+head(predDpoySVM)
+
+cm <- table(predDpoySVM, seasons_2015to2022_x$winner)
+cm
+
+tp <- cm[4]
+fp <- cm[3]
+tn <- cm[1]
+fn <- cm[2]
+
+accuracy2 <- sum((tp + tn)/(tp + tn + fp + fn))
+accuracy2
+precision <- sum(tp/(tp + fp))
+precision
+recall <- sum(tp/(tp + fn)) 
+recall
+f1 <- sum(2*(precision*recall)/(precision + recall))
+f1
+
+# Assuming predDpoySVM (predicted values by SVM) and actual outcomes (seasons_2015to2022_x$winner) are already computed
+
+# Combine the SVM predicted values and actual outcomes into a new data frame
+comparison_df_svm <- data.frame(
+  ActualOutcomes = seasons_2015to2022_x$winner,
+  PredictedValuesSVM = predDpoySVM
+)
+
+# Print the first few rows of the comparison data frame
+print(comparison_df_svm)
+```
+
+```{r, echo=FALSE}
+predDpoySVMTest <- predict(svmDpoy, seasons_2015to2022_x)
+
+cmTest <- table(Predicted = predDpoySVMTest, Actual = seasons_2015to2022_x$winner)
+print(cmTest)
+# Assuming cmTest is the confusion matrix from the SVM predictions on the test data
+tpTest <- cmTest[2, 2] # True Positives are typically at position [2, 2] of the matrix
+tnTest <- cmTest[1, 1] # True Negatives are typically at position [1, 1] of the matrix
+totalCasesTest <- sum(cmTest) # Total number of cases
+
+# Calculate accuracy
+accuracySVMTest <- (tpTest + tnTest) / totalCasesTest
+print(accuracySVMTest)
+```
+
+```{r, echo=FALSE, include=FALSE}
+svmDpoy <- svm(formula = winner ~ mp + per + ts_percent + f_tr + drb_percent + stl_percent + blk_percent + dws + dbpm + playoffs, data = seasons_2023_x, type = 'C-classification', kernel = 'radial', gamma = 1)
+
+predDpoySVM <- predict(svmDpoy, seasons_2023_x)
+head(predDpoySVM)
+
+cm <- table(predDpoySVM, seasons_2023_x$winner)
+cm
+
+tp <- cm[4]
+fp <- cm[3]
+tn <- cm[1]
+fn <- cm[2]
+
+accuracy2 <- sum((tp + tn)/(tp + tn + fp + fn))
+accuracy2
+precision <- sum(tp/(tp + fp))
+precision
+recall <- sum(tp/(tp + fn)) 
+recall
+f1 <- sum(2*(precision*recall)/(precision + recall))
+f1
+
+# Assuming predDpoySVM (predicted values by SVM) and actual outcomes (seasons_2015to2022_x$winner) are already computed
+
+# Combine the SVM predicted values and actual outcomes into a new data frame
+comparison_df_svm <- data.frame(
+  ActualOutcomes = seasons_2023_x$winner,
+  PredictedValuesSVM = predDpoySVM
+)
+
+# Print the first few rows of the comparison data frame
+print(comparison_df_svm)
+```
+
+- Test data
+```{r, echo=FALSE}
+predDpoySVMTest <- predict(svmDpoy, seasons_2023_x)
+
+cmTest <- table(Predicted = predDpoySVMTest, Actual = seasons_2023_x$winner)
+print(cmTest)
+# Assuming cmTest is the confusion matrix from the SVM predictions on the test data
+tpTest <- cmTest[2, 2] # True Positives are typically at position [2, 2] of the matrix
+tnTest <- cmTest[1, 1] # True Negatives are typically at position [1, 1] of the matrix
+totalCasesTest <- sum(cmTest) # Total number of cases
+
+# Calculate accuracy
+accuracySVMTest <- (tpTest + tnTest) / totalCasesTest
+print(accuracySVMTest)
+```
+
+To assess the accuracy and performance of these models, we employed confusion matrices and compared the predicted outcomes against actual results. Our methodologies involved an initial phase of training the models with training data, followed by optimization processes to fine-tune their predictive capabilities. Subsequently, the models were tested with a separate set of test data to validate their predictive accuracy. The Support Vector Machine model consistently demonstrated the highest accuracy in these tests, affirming its suitability for predicting the DPOY winner in the NBA.
+
+The radial Support Vector Machine model demonstrated the highest accuracy both on training and test data, with ~ 98% on training data and 100% on the test data. Comparatively, other models showed varying degrees of accuracy, from ~ 84% - 93% on training data, with complex, classification, models generally outperforming regression models (Linear Regression, etc.). The most significant predictors of DPOY winners were found to be playoff appearances and DWS, and DBPM. We found a lot of the defensive predictors we thought would be influential weren’t. This we found, was do to the fact the statistics DBPM and DWS already take into account these other defensive stats. These stats included defensive rebounds, steals, blocks, etc. This led to what looks like few things playing into who the winner is, when in reality there are many factors rolled into these few.
+
+The superior performance of the Support Vector Machine model is attributed to its efficacy in classifying binary outcomes, which aligns well with the "win or lose" nature of the DPOY award. Our project demonstrates the potential of advanced machine learning models, particularly Support Vector Machine, in accurately predicting sports awards. We believe these methods can be applied to any sports awards wherein you have the adequate data, winner information, individual stats, team stats, etc. That being said, these findings have implications for sports betting and the broader field of sports analytics. Future research could explore the incorporation of more diverse data sources, exploring different predictors and different classifications models.
 
 ## References
-https://www.kaggle.com/datasets/sumitrodatta/nba-aba-baa-stats/data
 
+Data sets:
+https://www.kaggle.com/datasets/sumitrodatta/nba-aba-baa-stats/data
 
