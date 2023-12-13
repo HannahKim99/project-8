@@ -554,7 +554,7 @@ ggplot(coef_data, aes(x = reorder(Predictor, Coefficient), y = Coefficient, fill
   geom_bar(stat = "identity") +
   coord_flip() +  # Make the plot horizontal
   scale_fill_gradient(low = "blue", high = "red") + # Color gradient for visual appeal
-  labs(title = "Lasso Regression Model Coefficients", x = "Predictors", y = "Effect Size (Absolute Coefficient)") +
+  labs(title = "Logistic Regression Model Coefficients", x = "Predictors", y = "Effect Size (Absolute Coefficient)") +
   theme_minimal()
 ```
 
