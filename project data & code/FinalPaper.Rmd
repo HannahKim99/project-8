@@ -996,7 +996,7 @@ To assess the accuracy and performance of these models, we employed confusion ma
 
 The radial Support Vector Machine model demonstrated the highest accuracy both on training and test data, with ~ 98% on training data and 100% on the test data. Comparatively, other models showed accuracy around 94% on training data, with complex, classification, models generally outperforming regression models (Linear Regression, etc.). To be specific, Random forest, Decision tree, and Support vector machine showed higher accuracy on the training data. The most significant predictors of DPOY winners were found to be playoff appearances and DWS, and DBPM. We found a lot of the defensive predictors we thought would be influential weren’t. 
 
-```{r, echo=FALSE, fig.height = 5, fig.width = 8}
+```{r, echo=FALSE, fig.height = 3, fig.width = 5,fig.align='center'}
 set.seed(445)
 library(rpart)
 library(rpart.plot)
